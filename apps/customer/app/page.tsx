@@ -1,78 +1,36 @@
 "use client";
-
-import { useState } from "react";
-import { signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { useEffect,useRef,useState } from "react";
+import Script from "next/script";
+import { onAuthStateChanged,signInWithPopup,signOut,type User } from "firebase/auth";
+import { doc,onSnapshot } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
 import { getFirebaseClient } from "@taxi-capital/firebase";
-
-const services = [
-  ["🚕", "داخل المدينة", "مشاويرك اليومية", "city"],
-  ["🛣️", "بين المدن", "رحلات شمال سيناء والمحافظات", "intercity"],
-  ["⭐", "مشوار خاص", "سيارة لمشوارك الخاص", "private"],
-  ["🗓️", "حجز مسبق", "حدد موعد رحلتك", "scheduled"],
-] as const;
-
-export default function Home() {
-  const [service, setService] = useState("city");
-  const [pickup, setPickup] = useState("");
-  const [destination, setDestination] = useState("");
-  const [notice, setNotice] = useState("");
-  const [account, setAccount] = useState<{ name: string; email: string } | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
-  const handleGoogleSignIn = async () => {
-    setAuthBusy(true);
-    try {
-      const { auth, db, googleProvider } = getFirebaseClient();
-      const result = await signInWithPopup(auth, googleProvider);
-      const userRef = doc(db, "users", result.user.uid);
-      const userSnap = await getDoc(userRef);
-      if (!userSnap.exists()) {
-        await setDoc(userRef, { role: "customer", displayName: result.user.displayName ?? "", email: result.user.email ?? "", createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
-      }
-      setAccount({ name: result.user.displayName ?? "عميل تاكسي العاصمة", email: result.user.email ?? "" });
-      setNotice("تم تسجيل الدخول بنجاح. تفعيل الحجز الفعلي يتطلب إعداد خدمات الرحلات والموقع.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "تعذر تسجيل الدخول.";
-      setNotice(message.includes("Firebase is not configured") ? "لم يتم إعداد بيانات مشروع Firebase للموقع بعد." : "تعذر تسجيل الدخول. تأكد من تفعيل Google Sign-in في Firebase وأن النطاق مسموح.");
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-  const handleSignOut = async () => {
-    try { const { auth } = getFirebaseClient(); await signOut(auth); setAccount(null); setNotice("تم تسجيل الخروج."); }
-    catch { setNotice("تعذر تسجيل الخروج حالياً."); }
-  };
-  const submit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!pickup.trim() || !destination.trim()) {
-      setNotice("من فضلك اكتب مكان الانطلاق والوجهة.");
-      return;
-    }
-    setNotice(account ? "تم التحقق من بيانات الرحلة. ربط الموقع الجغرافي وإرسال الطلب للسائقين هو الجزء التالي قبل تفعيل الحجز." : "سجل الدخول بحساب Google أولاً. إرسال الطلب الفعلي لم يُفعّل بعد.");
-  };
-
-  return <main className="shell">
-    <nav><b className="logo">ت</b><strong>تاكسي العاصمة</strong><span>خدمتك تبدأ من هنا</span><div className="account">{account ? <><span>{account.name}</span><button type="button" onClick={handleSignOut}>خروج</button></> : <button type="button" onClick={handleGoogleSignIn} disabled={authBusy}>{authBusy ? "جارٍ الدخول..." : "الدخول بحساب Google"}</button>}</div></nav>
-    <section className="hero">
-      <div><small>مشوارك علينا</small><h1>مشوارك القادم<br/><i>أسهل معانا</i></h1>
-        <p>اطلب رحلتك بسهولة، وسيصل طلبك إلى السائقين المتاحين بالقرب منك بعد تفعيل النظام.</p>
-        <a href="#booking">اطلب رحلتك الآن ←</a>
-        <label>العريش · الشيخ زويد · رفح · جميع مدن شمال سيناء</label>
-      </div>
-      <div className="visual"><div className="rings"></div><div className="car"><div className="window"></div><b>CAPITAL TAXI</b><div className="wheel left"></div><div className="wheel right"></div></div><span className="pin">⌖ رحلتك تبدأ من موقعك</span></div>
-    </section>
-    <section id="services"><small>خدماتنا</small><h2>اختار نوع رحلتك</h2>
-      <div className="grid">{services.map(s=><button type="button" className={service===s[3]?"service selected":"service"} key={s[3]} onClick={()=>setService(s[3])}><em>{s[0]}</em><h3>{s[1]}</h3><p>{s[2]}</p></button>)}</div>
-    </section>
-    <section id="booking" className="booking"><div><small>حجز الرحلة</small><h2>إلى أين تذهب اليوم؟</h2><p>حدد نقطة الانطلاق والوجهة ونوع الخدمة.</p></div>
-      <form onSubmit={submit}>
-        <label>مكان الانطلاق<input value={pickup} onChange={e=>setPickup(e.target.value)} placeholder="مثال: شارع 23 يوليو - العريش" /></label>
-        <label>الوجهة<input value={destination} onChange={e=>setDestination(e.target.value)} placeholder="اكتب المكان الذي تريد الوصول إليه" /></label>
-        <button className="submit" type="submit">متابعة طلب الرحلة</button>
-        {notice && <p className="notice" role="status">{notice}</p>}
-        <small className="disclaimer">نسخة الواجهة قيد التطوير ولم يتم تفعيل إرسال الطلبات بعد.</small>
-      </form>
-    </section>
-    <footer>© {new Date().getFullYear()} تاكسي العاصمة · جميع الحقوق محفوظة</footer>
-  </main>;
+declare global { interface Window { google?: any } }
+type Point={latitude:number;longitude:number};
+type Place={label:string;point:Point};
+const HOME:Point={latitude:31.1321,longitude:33.8033};
+const services=[["city","🚕","داخل المدينة"],["intercity","🛣️","بين المدن"],["private","⭐","مشوار خاص"],["scheduled","🗓️","حجز مسبق"]];
+export default function Home(){
+ const [user,setUser]=useState<User|null>(null),[pickup,setPickup]=useState<Place>({label:"موقعي الحالي - العريش",point:HOME}),[destination,setDestination]=useState<Place|null>(null),[service,setService]=useState("city"),[vehicle,setVehicle]=useState("taxi"),[pricing,setPricing]=useState("automatic"),[fare,setFare]=useState("50"),[tripId,setTripId]=useState(""),[trip,setTrip]=useState<any>(null),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false),[mapReady,setMapReady]=useState(false);
+ const mapDiv=useRef<HTMLDivElement>(null),map=useRef<any>(null),fromMarker=useRef<any>(null),toMarker=useRef<any>(null),fromInput=useRef<HTMLInputElement>(null),toInput=useRef<HTMLInputElement>(null);
+ useEffect(()=>{let stop:(()=>void)|undefined;try{stop=onAuthStateChanged(getFirebaseClient().auth,setUser);}catch{setNotice("إعداد Firebase غير مكتمل.");}return()=>stop?.();},[]);
+ useEffect(()=>{if(!tripId)return;return onSnapshot(doc(getFirebaseClient().db,"trips",tripId),s=>setTrip(s.exists()?s.data():null),()=>setNotice("تعذر تحديث حالة الرحلة."));},[tripId]);
+ const mapLoaded=()=>{if(!window.google||!mapDiv.current||map.current)return;const g=window.google.maps;const m=new g.Map(mapDiv.current,{center:{lat:pickup.point.latitude,lng:pickup.point.longitude},zoom:14,disableDefaultUI:true,zoomControl:true,gestureHandling:"greedy"});map.current=m;fromMarker.current=new g.Marker({map:m,position:{lat:pickup.point.latitude,lng:pickup.point.longitude},draggable:true,label:"انطلاق"});fromMarker.current.addListener("dragend",()=>{const p=fromMarker.current.getPosition();setPickup({label:"نقطة الانطلاق على الخريطة",point:{latitude:p.lat(),longitude:p.lng()}});});m.addListener("click",(e:any)=>{const p={latitude:e.latLng.lat(),longitude:e.latLng.lng()};if(!toMarker.current)toMarker.current=new g.Marker({map:m,position:e.latLng,draggable:true,label:"الوصول"});else toMarker.current.setPosition(e.latLng);setDestination({label:"الوجهة المحددة على الخريطة",point:p});});if(g.places?.Autocomplete){[[fromInput.current,"from"],[toInput.current,"to"]].forEach(([el,kind]:any)=>{if(!el)return;const ac=new g.places.Autocomplete(el,{fields:["formatted_address","geometry","name"],componentRestrictions:{country:"eg"}});ac.addListener("place_changed",()=>{const p=ac.getPlace();if(!p.geometry?.location)return;const loc=p.geometry.location,v={label:p.formatted_address||p.name||el.value,point:{latitude:loc.lat(),longitude:loc.lng()}};if(kind==="from"){setPickup(v);fromMarker.current.setPosition(loc);}else{setDestination(v);if(!toMarker.current)toMarker.current=new g.Marker({map:m,position:loc,label:"الوصول"});else toMarker.current.setPosition(loc);}m.panTo(loc);});});}setMapReady(true);};
+ const locate=()=>navigator.geolocation?.getCurrentPosition(pos=>{const p={latitude:pos.coords.latitude,longitude:pos.coords.longitude};setPickup({label:"موقعي الحالي",point:p});const ll={lat:p.latitude,lng:p.longitude};map.current?.panTo(ll);fromMarker.current?.setPosition(ll);},()=>setNotice("اسمح للموقع بالوصول إلى GPS."),{enableHighAccuracy:true,timeout:12000});
+ const login=async()=>{setBusy(true);try{const c=getFirebaseClient();await signInWithPopup(c.auth,c.googleProvider);}catch{setNotice("تعذر الدخول بحساب Google.");}finally{setBusy(false);}};
+ const request=async(e:React.FormEvent)=>{e.preventDefault();if(!user){setNotice("سجل الدخول أولاً.");return;}if(!destination){setNotice("حدد الوجهة من البحث أو بالضغط على الخريطة.");return;}setBusy(true);try{const call=httpsCallable(getFirebaseClient().functions,"createTrip");const result:any=await call({pickup:pickup.point,destination:destination.point,serviceType:service,cityId:"alarish",vehicleType:vehicle,pricingMode:pricing,offeredFare:pricing==="offer"?Number(fare):null,pickupLabel:pickup.label,destinationLabel:destination.label});setTripId(result.data.tripId);setNotice("تم إرسال طلب الرحلة.");}catch(err){setNotice(err instanceof Error?err.message:"تعذر إرسال الطلب.");}finally{setBusy(false);}};
+ const cancel=async()=>{setBusy(true);try{await httpsCallable(getFirebaseClient().functions,"cancelTrip")({tripId});setTripId("");setTrip(null);setNotice("تم إلغاء الرحلة.");}catch{setNotice("تعذر الإلغاء.");}finally{setBusy(false);}};
+ const names:any={searching:"جارٍ البحث عن سائق",accepted:"تم قبول الرحلة",in_progress:"الرحلة جارية",completed:"اكتملت الرحلة",cancelled:"أُلغيت الرحلة"};
+ return <main className="ride-app" dir="rtl"><Script src={"https://maps.googleapis.com/maps/api/js?key="+(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY||"")+"&libraries=places&language=ar&region=EG"} strategy="afterInteractive" onLoad={mapLoaded} onError={()=>setNotice("تعذر تحميل الخريطة؛ راجع مفتاح Google Maps.")}/>
+ <header className="ride-header"><b className="brand-mark">ت</b><div><strong>تاكسي العاصمة</strong><small>تنقّل بذكاء · العريش وشمال سيناء</small></div><div className="auth-area">{user?<><span>{user.displayName||user.email}</span><button onClick={()=>signOut(getFirebaseClient().auth)}>خروج</button></>:<button disabled={busy} onClick={login}>دخول Google</button>}</div></header>
+ <section className="map-layout"><div className="map-area"><div ref={mapDiv} className="real-map"/>{!mapReady&&<div className="map-placeholder"><b>⌖ خريطة تاكسي العاصمة</b><small>جارٍ تحميل خريطة العريش</small></div>}<button className="locate" onClick={locate}>◎ موقعي الحالي</button></div>
+ <aside className="booking-card"><small className="gold">مشوارك يبدأ هنا</small><h1>رايح فين النهارده؟</h1><p>احجز رحلتك بسهولة وأمان.</p>{tripId&&trip?<div className="trip-state"><h3>{names[trip.status]||trip.status}</h3><small>رقم الرحلة: {tripId.slice(0,9)}</small>{trip.assignedDriverId&&<p>تم إسناد الرحلة إلى سائق.</p>}{["searching","accepted"].includes(trip.status)&&<button className="cancel" onClick={cancel} disabled={busy}>إلغاء الرحلة</button>}</div>:<form onSubmit={request}>
+ <label>نقطة الانطلاق<input ref={fromInput} defaultValue={pickup.label} placeholder="ابحث عن موقع الانطلاق"/></label>
+ <label>الوجهة<input ref={toInput} defaultValue="" placeholder="إلى أين تريد الذهاب؟"/></label>
+ <label>نوع الرحلة<div className="option-grid">{services.map(s=><button type="button" key={s[0]} className={service===s[0]?"option chosen":"option"} onClick={()=>setService(s[0])}><span>{s[1]}</span>{s[2]}</button>)}</div></label>
+ <label>السيارة<div className="two-options"><button type="button" className={vehicle==="taxi"?"chosen":""} onClick={()=>setVehicle("taxi")}>🚕 أجرة</button><button type="button" className={vehicle==="private"?"chosen":""} onClick={()=>setVehicle("private")}>🚘 خاصة</button></div></label>
+ <label>السعر<div className="two-options"><button type="button" className={pricing==="automatic"?"chosen":""} onClick={()=>setPricing("automatic")}>تسعير المنصة</button><button type="button" className={pricing==="offer"?"chosen":""} onClick={()=>setPricing("offer")}>أقترح سعري</button></div></label>
+ {pricing==="offer"&&<label>السعر المقترح بالجنيه<input type="number" min="1" value={fare} onChange={e=>setFare(e.target.value)}/></label>}
+ <button className="submit-ride" disabled={busy}>{busy?"جارٍ إرسال الطلب...":"ابحث عن سيارة ←"}</button><small className="hint">يصل الطلب إلى السائقين المتاحين في نطاقك.</small></form>}
+ {notice&&<div className="notice" role="status">{notice}</div>}<div className="card-foot">رحلات داخل العريش وخارجها</div></aside></section><footer>© {new Date().getFullYear()} تاكسي العاصمة · راحتك وأمانك أولويتنا</footer></main>;
 }
