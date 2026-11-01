@@ -202,7 +202,7 @@ export const startTrip = onCall({ region: REGION, enforceAppCheck: true }, async
     if (trip.status !== "accepted") throw new HttpsError("failed-precondition", "لا يمكن بدء الرحلة في حالتها الحالية.");
     tx.update(tripRef, { status: "in_progress", startedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     if (driverOfferSnap.exists) tx.update(driverOfferRef, { status: "in_progress", startedAt: FieldValue.serverTimestamp() });
-    tx.create(tripRef.collection("events").doc(),
+    tx.create(tripRef.collection("events").doc(), {
       type: "trip_started", actorId: request.auth!.uid, createdAt: FieldValue.serverTimestamp()
     });
     return { tripId, status: "in_progress" as const };
