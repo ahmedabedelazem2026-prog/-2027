@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getFunctions } from "firebase/functions";
+import { GoogleAuthProvider } from "firebase/auth";
 
 const required = [
   "NEXT_PUBLIC_FIREBASE_API_KEY",
@@ -28,6 +29,7 @@ export function getFirebaseClient() {
   return {
     app,
     auth: getAuth(app),
+    googleProvider: new GoogleAuthProvider(),
     db: getFirestore(app),
     functions: getFunctions(app, "europe-west1")
   };
