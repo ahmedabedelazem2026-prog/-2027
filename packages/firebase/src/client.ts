@@ -1,12 +1,12 @@
-import { getApp, getApps, initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
+import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getFunctions } from "firebase/functions";
-import { GoogleAuthProvider } from "firebase/auth";
-import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from "firebase/app-check";
-
-let appCheckInstance: AppCheck | null = null;
-import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from "firebase/app-check";
+import {
+  initializeAppCheck,
+  ReCaptchaEnterpriseProvider,
+  type AppCheck
+} from "firebase/app-check";
 
 let appCheckInstance: AppCheck | null = null;
 
@@ -26,24 +26,12 @@ const env = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 };
 
-function initializeTaxiAppCheck(app: import("firebase/app").FirebaseApp): AppCheck | null {
+function initializeTaxiAppCheck(app: FirebaseApp): AppCheck | null {
   const siteKey = process.env.NEXT_PUBLIC_FIREBASE_APPCHECK_SITE_KEY;
   if (typeof window === "undefined" || !siteKey) return null;
   if (!appCheckInstance) {
     appCheckInstance = initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(siteKey),
-      isTokenAutoRefreshEnabled: true
-    });
-  }
-  return appCheckInstance;
-}
-
-function initializeTaxiAppCheck(app: ReturnType<typeof initializeApp>): AppCheck | null {
-  const siteKey = process.env.NEXT_PUBLIC_FIREBASE_APPCHECK_SITE_KEY;
-  if (typeof window === "undefined" || !siteKey) return null;
-  if (!appCheckInstance) {
-    appCheckInstance = initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(siteKey),
+      provider: new ReCaptchaEnterpriseProvider(siteKey),
       isTokenAutoRefreshEnabled: true
     });
   }
