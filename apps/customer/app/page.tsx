@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { signInWithPopup, signOut } from "firebase/auth";
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { getFirebaseClient } from "@taxi-capital/firebase";
 
 const services = [
   ["🚕", "داخل المدينة", "مشاويرك اليومية", "city"],
@@ -14,17 +17,42 @@ export default function Home() {
   const [pickup, setPickup] = useState("");
   const [destination, setDestination] = useState("");
   const [notice, setNotice] = useState("");
+  const [account, setAccount] = useState<{ name: string; email: string } | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const handleGoogleSignIn = async () => {
+    setAuthBusy(true);
+    try {
+      const { auth, db, googleProvider } = getFirebaseClient();
+      const result = await signInWithPopup(auth, googleProvider);
+      const userRef = doc(db, "users", result.user.uid);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        await setDoc(userRef, { role: "customer", displayName: result.user.displayName ?? "", email: result.user.email ?? "", createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      }
+      setAccount({ name: result.user.displayName ?? "عميل تاكسي العاصمة", email: result.user.email ?? "" });
+      setNotice("تم تسجيل الدخول بنجاح. تفعيل الحجز الفعلي يتطلب إعداد خدمات الرحلات والموقع.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "تعذر تسجيل الدخول.";
+      setNotice(message.includes("Firebase is not configured") ? "لم يتم إعداد بيانات مشروع Firebase للموقع بعد." : "تعذر تسجيل الدخول. تأكد من تفعيل Google Sign-in في Firebase وأن النطاق مسموح.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+  const handleSignOut = async () => {
+    try { const { auth } = getFirebaseClient(); await signOut(auth); setAccount(null); setNotice("تم تسجيل الخروج."); }
+    catch { setNotice("تعذر تسجيل الخروج حالياً."); }
+  };
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!pickup.trim() || !destination.trim()) {
       setNotice("من فضلك اكتب مكان الانطلاق والوجهة.");
       return;
     }
-    setNotice("واجهة الحجز جاهزة. إرسال الطلب الفعلي سيتاح بعد ربط Firebase وتسجيل الدخول.");
+    setNotice(account ? "تم التحقق من بيانات الرحلة. ربط الموقع الجغرافي وإرسال الطلب للسائقين هو الجزء التالي قبل تفعيل الحجز." : "سجل الدخول بحساب Google أولاً. إرسال الطلب الفعلي لم يُفعّل بعد.");
   };
 
   return <main className="shell">
-    <nav><b className="logo">ت</b><strong>تاكسي العاصمة</strong><span>خدمتك تبدأ من هنا</span></nav>
+    <nav><b className="logo">ت</b><strong>تاكسي العاصمة</strong><span>خدمتك تبدأ من هنا</span><div className="account">{account ? <><span>{account.name}</span><button type="button" onClick={handleSignOut}>خروج</button></> : <button type="button" onClick={handleGoogleSignIn} disabled={authBusy}>{authBusy ? "جارٍ الدخول..." : "الدخول بحساب Google"}</button>}</div></nav>
     <section className="hero">
       <div><small>مشوارك علينا</small><h1>مشوارك القادم<br/><i>أسهل معانا</i></h1>
         <p>اطلب رحلتك بسهولة، وسيصل طلبك إلى السائقين المتاحين بالقرب منك بعد تفعيل النظام.</p>
