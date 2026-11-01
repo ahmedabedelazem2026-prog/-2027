@@ -13,6 +13,18 @@
 4. أنشئ قاعدة Firestore في وضع الإنتاج، ثم راجع قواعد المستودع قبل النشر.
 5. من Project settings > General > Your apps انسخ إعدادات تطبيق الويب.
 
+## إعدادات مشروع تاكسي العاصمة
+
+تم استلام إعدادات تطبيق الويب للمشروع التالي:
+- `projectId`: `taxi-alasema-app-2026`
+- `authDomain`: `taxi-alasema-app-2026.firebaseapp.com`
+- `messagingSenderId`: `343674981534`
+- `appId`: `1:343674981534:web:da9dbe1c000999b107bf8f`
+
+اربط هذه القيم بمتغيرات البيئة المقابلة أدناه. لا نضع `apiKey` داخل ملفات Git؛ أضفه مباشرة في إعدادات البيئة في Vercel أو في `.env.local` على جهازك. مفتاح Firebase للويب ليس مفتاح Admin، لكن يُفضّل تقييده من Google Cloud حسب المواقع وواجهات API التي يحتاجها التطبيق.
+
+ملاحظة: الإعداد المرسل يحتوي أيضاً `databaseURL` لـ Realtime Database، لكن الكود الحالي للموقع يستخدم **Cloud Firestore** (`getFirestore`) وليس Realtime Database؛ لذلك لا يكفي وجود رابط Realtime Database لتشغيل الرحلات. تأكد من إنشاء Firestore في مشروع Firebase نفسه.
+
 ## متغيرات البيئة
 انسخ `.env.example` إلى `.env.local` محلياً، وأدخل القيم من إعدادات تطبيق الويب:
 - `NEXT_PUBLIC_FIREBASE_API_KEY`
