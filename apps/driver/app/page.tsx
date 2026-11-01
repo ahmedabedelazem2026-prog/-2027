@@ -6,7 +6,7 @@ import { collection, doc, onSnapshot, type DocumentData } from "firebase/firesto
 import { httpsCallable } from "firebase/functions";
 import { getFirebaseClient } from "@taxi-capital/firebase";
 
-type DriverOffer = { tripId: string; serviceType?: string; cityId?: string; pickup?: {latitude:number;longitude:number}; destination?: {latitude:number;longitude:number}; distanceKm?: number; status: string };
+type DriverOffer = { tripId: string; serviceType?: string; cityId?: string; vehicleType?: string; pricingMode?: string; offeredFare?: number|null; pickupLabel?: string; destinationLabel?: string; pickup?: {latitude:number;longitude:number}; destination?: {latitude:number;longitude:number}; distanceKm?: number; status: string };
 const serviceNames: Record<string,string> = {city:"داخل المدينة",intercity:"بين المدن",private:"مشوار خاص",scheduled:"حجز مسبق",parcel:"توصيل طرود"};
 
 export default function Driver() {
@@ -65,7 +65,7 @@ export default function Driver() {
         </>}
       </>}
     </section>
-    <section style={{marginTop:22}}><h2>عروض الرحلات</h2>{offers.length===0?<p>لا توجد عروض حالياً.</p>:offers.map(o=><article key={o.tripId} style={{background:"white",padding:18,borderRadius:14,marginBottom:12}}><b>{serviceNames[o.serviceType||""]||"طلب رحلة"}</b><p>المدينة: {o.cityId||"—"} · المسافة التقريبية: {typeof o.distanceKm==="number"?o.distanceKm+" كم":"—"}</p><p>نقطة الانطلاق: {o.pickup?o.pickup.latitude.toFixed(4)+", "+o.pickup.longitude.toFixed(4):"—"}</p><p>الوجهة: {o.destination?o.destination.latitude.toFixed(4)+", "+o.destination.longitude.toFixed(4):"—"}</p><p>الحالة: {o.status==="accepted"?"مقبولة":o.status==="in_progress"?"قيد التنفيذ": "بانتظار الرد"}</p>{o.status==="pending"&&<button disabled={busy||driver?.approvalStatus!=="approved"||driver?.availability!=="online"} onClick={()=>accept(o.tripId)}>قبول الرحلة</button>}{o.status==="accepted"&&<button disabled={busy} onClick={()=>start(o.tripId)}>بدء الرحلة</button>}</article>)}</section>
+    <section style={{marginTop:22}}><h2>عروض الرحلات</h2>{offers.length===0?<p>لا توجد عروض حالياً.</p>:offers.map(o=><article key={o.tripId} style={{background:"white",padding:18,borderRadius:14,marginBottom:12}}><b>{serviceNames[o.serviceType||""]||"طلب رحلة"}</b><p>السيارة: {o.vehicleType==="private"?"خاصة":"أجرة"} · التسعير: {o.pricingMode==="offer"?"عرض العميل":"سعر المنصة"} {o.offeredFare? "· "+o.offeredFare+" جنيه":""}</p><p>من: {o.pickupLabel||"الموقع على الخريطة"}</p><p>إلى: {o.destinationLabel||"الموقع على الخريطة"}</p><p>المدينة: {o.cityId||"—"} · المسافة التقريبية: {typeof o.distanceKm==="number"?o.distanceKm+" كم":"—"}</p><p>نقطة الانطلاق: {o.pickup?o.pickup.latitude.toFixed(4)+", "+o.pickup.longitude.toFixed(4):"—"}</p><p>الوجهة: {o.destination?o.destination.latitude.toFixed(4)+", "+o.destination.longitude.toFixed(4):"—"}</p><p>الحالة: {o.status==="accepted"?"مقبولة":o.status==="in_progress"?"قيد التنفيذ": "بانتظار الرد"}</p>{o.status==="pending"&&<button disabled={busy||driver?.approvalStatus!=="approved"||driver?.availability!=="online"} onClick={()=>accept(o.tripId)}>قبول الرحلة</button>}{o.status==="accepted"&&<button disabled={busy} onClick={()=>start(o.tripId)}>بدء الرحلة</button>}</article>)}</section>
     {notice&&<p role="status" style={{background:"#fff8e9",padding:12,borderRadius:10}}>{notice}</p>}
     <p style={{color:"#718096",fontSize:12,marginTop:24}}>تتطلب الوظائف المنشورة تفعيل Firebase App Check قبل التشغيل.</p>
   </main>;
