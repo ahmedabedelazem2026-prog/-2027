@@ -141,10 +141,10 @@ export const acceptTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     allOffersSnap.docs.forEach((otherOffer) => {
       const otherDriverId = otherOffer.id;
       const mirrorRef = db.collection("driverOffers").doc(otherDriverId).collection("items").doc(tripId);
-      if (otherDriverId === driverId) tx.update(mirrorRef, { status: "accepted", respondedAt: FieldValue.serverTimestamp() });
+      if (otherDriverId === driverId) tx.set(mirrorRef, { tripId, driverId, status: "accepted", respondedAt: FieldValue.serverTimestamp() }, { merge: true });
       else if (otherOffer.data().status === "pending") {
         tx.update(otherOffer.ref, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
-        tx.update(mirrorRef, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
+        tx.set(mirrorRef, { tripId, driverId: otherDriverId, status: "expired", respondedAt: FieldValue.serverTimestamp() }, { merge: true });
       }
     });
     tx.create(tripRef.collection("events").doc(), {
@@ -194,13 +194,15 @@ export const startTrip = onCall({ region: REGION, enforceAppCheck: true }, async
   if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
   const tripRef = db.collection("trips").doc(tripId);
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(tripRef);
+    const driverOfferRef = db.collection("driverOffers").doc(request.auth!.uid).collection("items").doc(tripId);
+    const [snap, driverOfferSnap] = await Promise.all([tx.get(tripRef), tx.get(driverOfferRef)]);
     if (!snap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
     const trip = snap.data()!;
     if (trip.assignedDriverId !== request.auth!.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
     if (trip.status !== "accepted") throw new HttpsError("failed-precondition", "لا يمكن بدء الرحلة في حالتها الحالية.");
     tx.update(tripRef, { status: "in_progress", startedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
-    tx.create(tripRef.collection("events").doc(), {
+    if (driverOfferSnap.exists) tx.update(driverOfferRef, { status: "in_progress", startedAt: FieldValue.serverTimestamp() });
+    tx.create(tripRef.collection("events").doc(),
       type: "trip_started", actorId: request.auth!.uid, createdAt: FieldValue.serverTimestamp()
     });
     return { tripId, status: "in_progress" as const };
