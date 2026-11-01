@@ -1,0 +1,8 @@
+{
+  "name": "@taxi-capital/firebase",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/client.ts",
+  "types": "./src/client.ts",
+  "dependencies": { "firebase": "^10.14.1" }
+}
