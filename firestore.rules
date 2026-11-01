@@ -22,11 +22,24 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
     match /trips/{tripId} {
-      allow read: if signedIn() &&
-        (resource.data.customerId == request.auth.uid ||
-         resource.data.assignedDriverId == request.auth.uid || isAdmin());
+      function canSeeTrip() {
+        return signedIn() &&
+          (resource.data.customerId == request.auth.uid ||
+           resource.data.assignedDriverId == request.auth.uid || isAdmin());
+      }
+      allow read: if canSeeTrip();
       // Trip creation, assignment, pricing and status transitions are server-only.
       allow create, update, delete: if false;
+      match /offers/{driverId} {
+        // Drivers can only read offers addressed to their own UID.
+        allow get: if signedIn() && (request.auth.uid == driverId || isAdmin());
+        allow list: if false;
+        allow write: if false;
+      }
+      match /events/{eventId} {
+        allow read: if canSeeTrip();
+        allow write: if false;
+      }
     }
     match /fareConfigs/{configId} {
       allow read: if signedIn();
