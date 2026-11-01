@@ -150,3 +150,123 @@ export const createTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     throw new HttpsError("internal", "تم تسجيل الرحلة لكن تعذر إرسال عروض السائقين حالياً.");
   }
 });
+
+
+/** Driver starts an already accepted trip. */
+export const startTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const tripId = String(request.data?.tripId ?? "").trim();
+  if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
+  const tripRef = db.collection("trips").doc(tripId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(tripRef);
+    if (!snap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
+    const trip = snap.data()!;
+    if (trip.assignedDriverId !== request.auth!.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
+    if (trip.status !== "accepted") throw new HttpsError("failed-precondition", "لا يمكن بدء الرحلة في حالتها الحالية.");
+    tx.update(tripRef, { status: "in_progress", startedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    tx.create(tripRef.collection("events").doc(), {
+      type: "trip_started", actorId: request.auth!.uid, createdAt: FieldValue.serverTimestamp()
+    });
+    return { tripId, status: "in_progress" as const };
+  });
+});
+
+/**
+ * Completes a trip using a route distance written by a trusted server-side
+ * routing integration. Never accept distance or fare from the mobile client.
+ * Fare config document ID: {cityId}__{serviceType}.
+ */
+export const completeTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const tripId = String(request.data?.tripId ?? "").trim();
+  if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
+  const tripRef = db.collection("trips").doc(tripId);
+
+  return db.runTransaction(async (tx) => {
+    const tripSnap = await tx.get(tripRef);
+    if (!tripSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
+    const trip = tripSnap.data()!;
+    if (trip.assignedDriverId !== request.auth!.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
+    if (trip.status !== "in_progress") throw new HttpsError("failed-precondition", "يجب بدء الرحلة أولاً.");
+    const km = trip.routeDistanceKm;
+    if (typeof km !== "number" || !Number.isFinite(km) || km <= 0 || km > 1000) {
+      throw new HttpsError("failed-precondition", "لم يتم تسجيل مسافة الطريق المعتمدة للرحلة بعد.");
+    }
+
+    const fareRef = db.collection("fareConfigs").doc(`${trip.cityId}__${trip.serviceType}`);
+    const driverRef = db.collection("drivers").doc(request.auth!.uid);
+    const [fareSnap, driverSnap] = await Promise.all([tx.get(fareRef), tx.get(driverRef)]);
+    if (!fareSnap.exists) throw new HttpsError("failed-precondition", "تعريفة هذه الخدمة غير مضبوطة من الإدارة.");
+    if (!driverSnap.exists) throw new HttpsError("failed-precondition", "ملف السائق غير موجود.");
+    const fare = fareSnap.data()!;
+    const baseFare = fare.baseFare;
+    const perKm = fare.perKm;
+    const minimumFare = fare.minimumFare;
+    const commissionRate = fare.commissionRate;
+    if (![baseFare, perKm, minimumFare, commissionRate].every((v) => typeof v === "number" && Number.isFinite(v)) ||
+        baseFare < 0 || perKm < 0 || minimumFare < 0 || commissionRate < 0 || commissionRate > 1) {
+      throw new HttpsError("failed-precondition", "إعدادات التعريفة غير صحيحة.");
+    }
+    const totalFare = Math.round(Math.max(minimumFare, baseFare + perKm * km) * 100) / 100;
+    const commission = Math.round(totalFare * commissionRate * 100) / 100;
+    const driverNet = Math.round((totalFare - commission) * 100) / 100;
+
+    tx.update(tripRef, {
+      status: "completed", completedAt: FieldValue.serverTimestamp(),
+      routeDistanceKm: km, totalFare, commission, driverNet,
+      paymentMethod: "cash", paymentStatus: "pending_collection",
+      updatedAt: FieldValue.serverTimestamp()
+    });
+    tx.update(driverRef, {
+      availability: "online", currentTripId: FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp()
+    });
+    tx.create(db.collection("financialLedger").doc(), {
+      tripId, driverId: request.auth!.uid, cityId: trip.cityId,
+      totalFare, commission, driverNet, paymentMethod: "cash",
+      status: "pending_collection", createdAt: FieldValue.serverTimestamp()
+    });
+    tx.create(tripRef.collection("events").doc(), {
+      type: "trip_completed", actorId: request.auth!.uid,
+      totalFare, commission, driverNet, createdAt: FieldValue.serverTimestamp()
+    });
+    return { tripId, status: "completed" as const, totalFare, commission, driverNet, paymentMethod: "cash" as const };
+  });
+});
+
+/** Customer or assigned driver may cancel before the trip starts. */
+export const cancelTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const tripId = String(request.data?.tripId ?? "").trim();
+  if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
+  const tripRef = db.collection("trips").doc(tripId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(tripRef);
+    if (!snap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
+    const trip = snap.data()!;
+    const uid = request.auth!.uid;
+    const isCustomer = trip.customerId === uid;
+    const isAssignedDriver = trip.assignedDriverId === uid;
+    if (!isCustomer && !isAssignedDriver) throw new HttpsError("permission-denied", "غير مسموح لك بإلغاء هذه الرحلة.");
+    if (!["searching", "accepted"].includes(trip.status)) {
+      throw new HttpsError("failed-precondition", "لا يمكن إلغاء الرحلة بعد بدء تنفيذها.");
+    }
+    let driverRef: FirebaseFirestore.DocumentReference | undefined;
+    if (isAssignedDriver && trip.assignedDriverId) {
+      driverRef = db.collection("drivers").doc(trip.assignedDriverId);
+      const driverSnap = await tx.get(driverRef);
+      if (driverSnap.exists) tx.update(driverRef, {
+        availability: "online", currentTripId: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp()
+      });
+    }
+    tx.update(tripRef, {
+      status: "cancelled", cancelledBy: uid, cancelledAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp()
+    });
+    tx.create(tripRef.collection("events").doc(), {
+      type: "trip_cancelled", actorId: uid, createdAt: FieldValue.serverTimestamp()
+    });
+    return { tripId, status: "cancelled" as const };
+  });
+});
