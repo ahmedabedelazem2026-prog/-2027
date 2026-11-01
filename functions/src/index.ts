@@ -73,6 +73,8 @@ async function createFirstDispatchWave(tripId: string, cityId: string, pickup: P
     batch.create(driverOfferRef, {
       tripId, driverId: driver.id, wave: 1, pickup: trip.pickup,
       destination: trip.destination, serviceType: trip.serviceType,
+      vehicleType: trip.vehicleType ?? "taxi", pricingMode: trip.pricingMode ?? "automatic",
+      offeredFare: trip.offeredFare ?? null, pickupLabel: trip.pickupLabel ?? "", destinationLabel: trip.destinationLabel ?? "",
       cityId: trip.cityId, distanceKm: Math.round(driver.distanceKm * 100) / 100,
       status: "pending", createdAt: FieldValue.serverTimestamp()
     });
@@ -158,9 +160,14 @@ export const acceptTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
 export const createTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
   const { pickup, destination, serviceType, cityId } = request.data ?? {};
+  const vehicleType = request.data?.vehicleType ?? "taxi";
+  const pricingMode = request.data?.pricingMode ?? "automatic";
+  const offeredFare = request.data?.offeredFare ?? null;
+  const pickupLabel = typeof request.data?.pickupLabel === "string" ? request.data.pickupLabel.slice(0, 240) : "";
+  const destinationLabel = typeof request.data?.destinationLabel === "string" ? request.data.destinationLabel.slice(0, 240) : "";
   const allowedServices = ["city", "intercity", "private", "scheduled", "parcel"];
   if (!validPoint(pickup) || !validPoint(destination) ||
-      !allowedServices.includes(serviceType) || typeof cityId !== "string" || !cityId.trim()) {
+      !allowedServices.includes(serviceType) || typeof cityId !== "string" || !cityId.trim() || !["taxi", "private"].includes(vehicleType) || !["automatic", "offer"].includes(pricingMode) || (pricingMode === "offer" && (typeof offeredFare !== "number" || !Number.isFinite(offeredFare) || offeredFare <= 0 || offeredFare > 100000))) {
     throw new HttpsError("invalid-argument", "بيانات الرحلة غير مكتملة أو غير صحيحة.");
   }
   const userSnap = await db.collection("users").doc(request.auth.uid).get();
@@ -171,7 +178,8 @@ export const createTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     customerId: request.auth.uid,
     pickup: { latitude: pickup.latitude, longitude: pickup.longitude },
     destination: { latitude: destination.latitude, longitude: destination.longitude },
-    serviceType, cityId: cityId.trim(), status: "searching",
+    serviceType, cityId: cityId.trim(), vehicleType, pricingMode,
+    offeredFare: pricingMode === "offer" ? offeredFare : null, pickupLabel, destinationLabel, status: "searching",
     dispatchState: "queued", dispatchWave: 0, offeredDriverIds: [],
     assignedDriverId: null, createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp()
