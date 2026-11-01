@@ -1,0 +1,1 @@
+const nextConfig = { transpilePackages: ["@taxi-capital/firebase"] }; export default nextConfig;

@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if signedIn() && request.auth.uid == userId
+        && request.resource.data.role == "customer";
+      allow update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.approvalStatus == resource.data.approvalStatus;
+      allow delete: if isAdmin();
+    }
+    match /drivers/{driverId} {
+      allow read: if signedIn() && (request.auth.uid == driverId || isAdmin());
+      allow create: if signedIn() && request.auth.uid == driverId
+        && request.resource.data.approvalStatus == "pending";
+      allow update, delete: if isAdmin();
+    }
+    match /trips/{tripId} {
+      function canSeeTrip() {
+        return signedIn() &&
+          (resource.data.customerId == request.auth.uid ||
+           resource.data.assignedDriverId == request.auth.uid || isAdmin());
+      }
+      allow read: if canSeeTrip();
+      // Trip creation, assignment, pricing and status transitions are server-only.
+      allow create, update, delete: if false;
+      match /offers/{driverId} {
+        // Drivers can only read offers addressed to their own UID.
+        allow get: if signedIn() && (request.auth.uid == driverId || isAdmin());
+        allow list: if false;
+        allow write: if false;
+      }
+      match /events/{eventId} {
+        allow read: if signedIn() &&
+          (get(/databases/$(database)/documents/trips/$(tripId)).data.customerId == request.auth.uid ||
+           get(/databases/$(database)/documents/trips/$(tripId)).data.assignedDriverId == request.auth.uid ||
+           isAdmin());
+        allow write: if false;
+      }
+    }
+    match /driverOffers/{driverId}/items/{tripId} {
+      allow read: if signedIn() && (request.auth.uid == driverId || isAdmin());
+      allow write: if false;
+    }
+    match /fareConfigs/{configId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+    match /financialLedger/{entryId} {
+      allow read: if isAdmin() ||
+        (signedIn() && resource.data.driverId == request.auth.uid);
+      allow write: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
