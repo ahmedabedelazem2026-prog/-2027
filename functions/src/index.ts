@@ -252,9 +252,8 @@ export const cancelTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     if (!["searching", "accepted"].includes(trip.status)) {
       throw new HttpsError("failed-precondition", "لا يمكن إلغاء الرحلة بعد بدء تنفيذها.");
     }
-    let driverRef: FirebaseFirestore.DocumentReference | undefined;
-    if (isAssignedDriver && trip.assignedDriverId) {
-      driverRef = db.collection("drivers").doc(trip.assignedDriverId);
+    if (trip.assignedDriverId) {
+      const driverRef = db.collection("drivers").doc(trip.assignedDriverId);
       const driverSnap = await tx.get(driverRef);
       if (driverSnap.exists) tx.update(driverRef, {
         availability: "online", currentTripId: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp()
