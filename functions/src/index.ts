@@ -57,8 +57,11 @@ async function createFirstDispatchWave(tripId: string, cityId: string, pickup: P
   }
 
   const batch = db.batch();
+  const tripSnap = await db.collection("trips").doc(tripId).get();
+  const trip = tripSnap.data()!;
   ranked.forEach((driver, index) => {
     const offerRef = db.collection("trips").doc(tripId).collection("offers").doc(driver.id);
+    const driverOfferRef = db.collection("driverOffers").doc(driver.id).collection("items").doc(tripId);
     batch.create(offerRef, {
       driverId: driver.id,
       wave: 1,
@@ -66,6 +69,12 @@ async function createFirstDispatchWave(tripId: string, cityId: string, pickup: P
       position: index + 1,
       status: "pending",
       createdAt: FieldValue.serverTimestamp()
+    });
+    batch.create(driverOfferRef, {
+      tripId, driverId: driver.id, wave: 1, pickup: trip.pickup,
+      destination: trip.destination, serviceType: trip.serviceType,
+      cityId: trip.cityId, distanceKm: Math.round(driver.distanceKm * 100) / 100,
+      status: "pending", createdAt: FieldValue.serverTimestamp()
     });
   });
   batch.update(db.collection("trips").doc(tripId), {
@@ -77,6 +86,23 @@ async function createFirstDispatchWave(tripId: string, cityId: string, pickup: P
   await batch.commit();
   return { offeredDrivers: ranked.length };
 }
+
+/** Approved drivers can switch between online and offline. */
+export const setDriverAvailability = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const availability = request.data?.availability;
+  if (!["online", "offline"].includes(availability)) throw new HttpsError("invalid-argument", "حالة الاتصال غير صحيحة.");
+  const driverRef = db.collection("drivers").doc(request.auth.uid);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(driverRef);
+    if (!snap.exists) throw new HttpsError("failed-precondition", "لا يوجد ملف سائق لهذا الحساب. تواصل مع الإدارة لتسجيل واعتماد حسابك.");
+    const driver = snap.data()!;
+    if (driver.approvalStatus !== "approved") throw new HttpsError("permission-denied", "حسابك لم يحصل على اعتماد الإدارة بعد.");
+    if (driver.availability === "on_trip" && availability === "offline") throw new HttpsError("failed-precondition", "لا يمكنك تسجيل الخروج أثناء تنفيذ رحلة.");
+    tx.update(driverRef, { availability, updatedAt: FieldValue.serverTimestamp() });
+    return { availability };
+  });
+});
 
 /** The first valid acceptance wins; Firestore transaction prevents double assignment. */
 export const acceptTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
@@ -90,8 +116,8 @@ export const acceptTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
   const offerRef = tripRef.collection("offers").doc(driverId);
 
   return db.runTransaction(async (tx) => {
-    const [tripSnap, driverSnap, offerSnap] = await Promise.all([
-      tx.get(tripRef), tx.get(driverRef), tx.get(offerRef)
+    const [tripSnap, driverSnap, offerSnap, allOffersSnap] = await Promise.all([
+      tx.get(tripRef), tx.get(driverRef), tx.get(offerRef), tx.get(tripRef.collection("offers"))
     ]);
     if (!tripSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
     if (!driverSnap.exists) throw new HttpsError("permission-denied", "ملف السائق غير موجود.");
@@ -112,6 +138,15 @@ export const acceptTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     });
     tx.update(driverRef, { availability: "on_trip", currentTripId: tripId, updatedAt: FieldValue.serverTimestamp() });
     tx.update(offerRef, { status: "accepted", respondedAt: FieldValue.serverTimestamp() });
+    allOffersSnap.docs.forEach((otherOffer) => {
+      const otherDriverId = otherOffer.id;
+      const mirrorRef = db.collection("driverOffers").doc(otherDriverId).collection("items").doc(tripId);
+      if (otherDriverId === driverId) tx.update(mirrorRef, { status: "accepted", respondedAt: FieldValue.serverTimestamp() });
+      else if (otherOffer.data().status === "pending") {
+        tx.update(otherOffer.ref, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
+        tx.update(mirrorRef, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
+      }
+    });
     tx.create(tripRef.collection("events").doc(), {
       type: "trip_accepted", actorId: driverId, createdAt: FieldValue.serverTimestamp()
     });
