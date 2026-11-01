@@ -44,6 +44,10 @@ service cloud.firestore {
         allow write: if false;
       }
     }
+    match /driverOffers/{driverId}/items/{tripId} {
+      allow read: if signedIn() && (request.auth.uid == driverId || isAdmin());
+      allow write: if false;
+    }
     match /fareConfigs/{configId} {
       allow read: if signedIn();
       allow write: if isAdmin();
