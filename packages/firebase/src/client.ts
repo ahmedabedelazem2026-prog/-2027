@@ -6,6 +6,9 @@ import { GoogleAuthProvider } from "firebase/auth";
 import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from "firebase/app-check";
 
 let appCheckInstance: AppCheck | null = null;
+import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from "firebase/app-check";
+
+let appCheckInstance: AppCheck | null = null;
 
 const required = [
   "NEXT_PUBLIC_FIREBASE_API_KEY",
@@ -22,6 +25,18 @@ const env = {
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 };
+
+function initializeTaxiAppCheck(app: import("firebase/app").FirebaseApp): AppCheck | null {
+  const siteKey = process.env.NEXT_PUBLIC_FIREBASE_APPCHECK_SITE_KEY;
+  if (typeof window === "undefined" || !siteKey) return null;
+  if (!appCheckInstance) {
+    appCheckInstance = initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(siteKey),
+      isTokenAutoRefreshEnabled: true
+    });
+  }
+  return appCheckInstance;
+}
 
 function initializeTaxiAppCheck(app: ReturnType<typeof initializeApp>): AppCheck | null {
   const siteKey = process.env.NEXT_PUBLIC_FIREBASE_APPCHECK_SITE_KEY;
