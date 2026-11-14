@@ -1,10 +1,12 @@
 import { initializeApp } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
 
 initializeApp();
 const db = getFirestore();
 const REGION = "europe-west1";
+const googleMapsServerKey = defineSecret("GOOGLE_MAPS_SERVER_API_KEY");
 const FIRST_WAVE_SIZE = 5;
 const MAX_CANDIDATES = 50;
 
@@ -222,26 +224,56 @@ export const startTrip = onCall({ region: REGION, enforceAppCheck: true }, async
  * routing integration. Never accept distance or fare from the mobile client.
  * Fare config document ID: {cityId}__{serviceType}.
  */
-export const completeTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+export const completeTrip = onCall({ region: REGION, enforceAppCheck: true, secrets: [googleMapsServerKey] }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
   const tripId = String(request.data?.tripId ?? "").trim();
   if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
   const tripRef = db.collection("trips").doc(tripId);
+  const initialSnap = await tripRef.get();
+  if (!initialSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
+  const initialTrip = initialSnap.data()!;
+  if (initialTrip.assignedDriverId !== request.auth.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
+  if (initialTrip.status !== "in_progress") throw new HttpsError("failed-precondition", "يجب بدء الرحلة أولاً.");
 
+  let mapsKey = "";
+  try { mapsKey = googleMapsServerKey.value(); } catch {
+    throw new HttpsError("failed-precondition", "يلزم إعداد مفتاح Google Routes API الآمن على الخادم قبل إنهاء الرحلة.");
+  }
+  if (!mapsKey) throw new HttpsError("failed-precondition", "مفتاح Google Routes API غير مضبوط.");
+  const routeResponse = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": mapsKey,
+      "X-Goog-FieldMask": "routes.distanceMeters"
+    },
+    body: JSON.stringify({
+      origin: { location: { latLng: { latitude: initialTrip.pickup.latitude, longitude: initialTrip.pickup.longitude } } },
+      destination: { location: { latLng: { latitude: initialTrip.destination.latitude, longitude: initialTrip.destination.longitude } } },
+      travelMode: "DRIVE",
+      languageCode: "ar-EG",
+      units: "METRIC"
+    })
+  });
+  if (!routeResponse.ok) throw new HttpsError("unavailable", "تعذر حساب مسافة الطريق من خدمة الخرائط.");
+  const routeData = await routeResponse.json() as { routes?: { distanceMeters?: number }[] };
+  const distanceMeters = routeData.routes?.[0]?.distanceMeters;
+  const km = typeof distanceMeters === "number" ? distanceMeters / 1000 : 0;
+  if (!Number.isFinite(km) || km <= 0 || km > 1000) {
+    throw new HttpsError("failed-precondition", "لم تتوفر مسافة طريق صالحة لهذه الرحلة.");
+  }
+
+  const driverOfferRef = db.collection("driverOffers").doc(request.auth.uid).collection("items").doc(tripId);
   return db.runTransaction(async (tx) => {
     const tripSnap = await tx.get(tripRef);
     if (!tripSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
     const trip = tripSnap.data()!;
     if (trip.assignedDriverId !== request.auth!.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
     if (trip.status !== "in_progress") throw new HttpsError("failed-precondition", "يجب بدء الرحلة أولاً.");
-    const km = trip.routeDistanceKm;
-    if (typeof km !== "number" || !Number.isFinite(km) || km <= 0 || km > 1000) {
-      throw new HttpsError("failed-precondition", "لم يتم تسجيل مسافة الطريق المعتمدة للرحلة بعد.");
-    }
 
     const fareRef = db.collection("fareConfigs").doc(`${trip.cityId}__${trip.serviceType}`);
     const driverRef = db.collection("drivers").doc(request.auth!.uid);
-    const [fareSnap, driverSnap] = await Promise.all([tx.get(fareRef), tx.get(driverRef)]);
+    const [fareSnap, driverSnap, driverOfferSnap] = await Promise.all([tx.get(fareRef), tx.get(driverRef), tx.get(driverOfferRef)]);
     if (!fareSnap.exists) throw new HttpsError("failed-precondition", "تعريفة هذه الخدمة غير مضبوطة من الإدارة.");
     if (!driverSnap.exists) throw new HttpsError("failed-precondition", "ملف السائق غير موجود.");
     const fare = fareSnap.data()!;
@@ -266,6 +298,9 @@ export const completeTrip = onCall({ region: REGION, enforceAppCheck: true }, as
     tx.update(driverRef, {
       availability: "online", currentTripId: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp()
+    });
+    if (driverOfferSnap.exists) tx.update(driverOfferRef, {
+      status: "completed", completedAt: FieldValue.serverTimestamp()
     });
     tx.create(db.collection("financialLedger").doc(), {
       tripId, driverId: request.auth!.uid, cityId: trip.cityId,
