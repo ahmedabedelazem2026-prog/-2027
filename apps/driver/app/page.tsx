@@ -24,6 +24,7 @@ const statusNames: Record<string,string> = {
   completed:"مكتملة", expired:"انتهى الطلب"
 };
 const HOME = { lat: 31.1321, lng: 33.8033 };
+const money = (value: unknown) => typeof value === "number" ? value.toLocaleString("ar-EG") + " ج.م" : "—";
 
 export default function Driver() {
   const [user,setUser] = useState<User|null>(null);
