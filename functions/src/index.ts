@@ -344,6 +344,7 @@ export const completeTrip = onCall({ region: REGION, enforceAppCheck: true, secr
       paymentMethod: "cash", paymentStatus: "pending_collection",
       updatedAt: FieldValue.serverTimestamp()
     });
+    tx.delete(db.collection("tripDriverLocations").doc(tripId));
     tx.update(driverRef, {
       availability: "online", currentTripId: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp()
@@ -392,6 +393,7 @@ export const cancelTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
       status: "cancelled", cancelledBy: uid, cancelledAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp()
     });
+    tx.delete(db.collection("tripDriverLocations").doc(tripId));
     tx.create(tripRef.collection("events").doc(), {
       type: "trip_cancelled", actorId: uid, createdAt: FieldValue.serverTimestamp()
     });
