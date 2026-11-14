@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-const navigation = [
+type NavItem = { id: string; icon: string; label: string; count?: string };\n\nconst navigation: { group: string; items: NavItem[] }[] = [
   { group: "الرئيسية", items: [{ id: "overview", icon: "▦", label: "نظرة عامة" }] },
   { group: "إدارة التشغيل", items: [
     { id: "trips", icon: "↗", label: "إدارة الرحلات", count: "12" },
