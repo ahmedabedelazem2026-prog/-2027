@@ -314,3 +314,27 @@ export const cancelTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
     return { tripId, status: "cancelled" as const };
   });
 });
+
+
+/** Update the authenticated approved driver's live dispatch location. */
+export const updateDriverLocation = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const location = request.data?.location;
+  if (!validPoint(location)) throw new HttpsError("invalid-argument", "إحداثيات الموقع غير صحيحة.");
+  const driverRef = db.collection("drivers").doc(request.auth.uid);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(driverRef);
+    if (!snap.exists) throw new HttpsError("failed-precondition", "ملف السائق غير موجود.");
+    const driver = snap.data()!;
+    if (driver.approvalStatus !== "approved") throw new HttpsError("permission-denied", "حساب السائق غير معتمد.");
+    if (!["online", "on_trip"].includes(driver.availability)) {
+      throw new HttpsError("failed-precondition", "فعّل استقبال الرحلات قبل مشاركة الموقع.");
+    }
+    tx.update(driverRef, {
+      location: { latitude: location.latitude, longitude: location.longitude },
+      locationUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  });
+  return { updated: true };
+});
