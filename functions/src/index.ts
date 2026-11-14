@@ -1,12 +1,17 @@
 import { initializeApp } from "firebase-admin/app";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 
 initializeApp();
 const db = getFirestore();
 const REGION = "europe-west1";
+const googleMapsServerKey = defineSecret("GOOGLE_MAPS_SERVER_API_KEY");
 const FIRST_WAVE_SIZE = 5;
 const MAX_CANDIDATES = 50;
+const MAX_DISPATCH_WAVES = 3;
+const DISPATCH_RADII_KM = [5, 12, 25];
 
 type Point = { latitude: number; longitude: number };
 const validPoint = (p: any): p is Point => p && Number.isFinite(p.latitude) &&
@@ -28,68 +33,114 @@ function distanceKm(a: Point, b: Point): number {
  * Firestore so the driver app can listen to its own offer documents.
  * A trusted scheduled worker must open later waves when no driver accepts.
  */
-async function createFirstDispatchWave(tripId: string, cityId: string, pickup: Point) {
-  const candidates = await db.collection("drivers")
-    .where("cityId", "==", cityId)
-    .where("approvalStatus", "==", "approved")
-    .where("availability", "==", "online")
-    .limit(MAX_CANDIDATES)
-    .get();
-
+async function createDispatchWave(
+  tripId: string, cityId: string, pickup: Point, wave: number, excludedDriverIds: string[] = []
+) {
+  const candidates = await db.collection("drivers").where("cityId", "==", cityId).limit(MAX_CANDIDATES).get();
+  const radiusKm = DISPATCH_RADII_KM[Math.min(wave - 1, DISPATCH_RADII_KM.length - 1)];
+  const excluded = new Set(excludedDriverIds);
   const ranked = candidates.docs
-    .map((doc) => {
-      const data = doc.data();
+    .map((driverDoc) => {
+      const data = driverDoc.data();
+      if (excluded.has(driverDoc.id) || data.approvalStatus !== "approved" || data.availability !== "online") return null;
       const location = data.location;
       if (!validPoint(location)) return null;
-      return { id: doc.id, distanceKm: distanceKm(pickup, location as Point) };
+      return { id: driverDoc.id, distanceKm: distanceKm(pickup, location as Point) };
     })
     .filter((item): item is { id: string; distanceKm: number } => item !== null)
+    .filter((item) => item.distanceKm <= radiusKm)
     .sort((a, b) => a.distanceKm - b.distanceKm)
     .slice(0, FIRST_WAVE_SIZE);
-
-  if (!ranked.length) {
-    await db.collection("trips").doc(tripId).update({
-      dispatchState: "no_eligible_drivers",
-      dispatchWave: 0,
-      updatedAt: FieldValue.serverTimestamp()
-    });
-    return { offeredDrivers: 0 };
-  }
-
-  const batch = db.batch();
-  const tripSnap = await db.collection("trips").doc(tripId).get();
+  if (!ranked.length) return { offeredDrivers: 0, radiusKm };
+  const tripRef = db.collection("trips").doc(tripId);
+  const tripSnap = await tripRef.get();
+  if (!tripSnap.exists || tripSnap.data()?.status !== "searching") return { offeredDrivers: 0, radiusKm };
   const trip = tripSnap.data()!;
+  const expiresAt = Timestamp.fromMillis(Date.now() + 60_000);
+  const batch = db.batch();
   ranked.forEach((driver, index) => {
-    const offerRef = db.collection("trips").doc(tripId).collection("offers").doc(driver.id);
+    const offerRef = tripRef.collection("offers").doc(driver.id);
     const driverOfferRef = db.collection("driverOffers").doc(driver.id).collection("items").doc(tripId);
-    batch.create(offerRef, {
-      driverId: driver.id,
-      wave: 1,
-      distanceKm: Math.round(driver.distanceKm * 100) / 100,
-      position: index + 1,
-      status: "pending",
-      createdAt: FieldValue.serverTimestamp()
+    batch.set(offerRef, {
+      driverId: driver.id, wave, distanceKm: Math.round(driver.distanceKm * 100) / 100,
+      position: index + 1, status: "pending", expiresAt, createdAt: FieldValue.serverTimestamp()
     });
-    batch.create(driverOfferRef, {
-      tripId, driverId: driver.id, wave: 1, pickup: trip.pickup,
-      destination: trip.destination, serviceType: trip.serviceType,
-      vehicleType: trip.vehicleType ?? "taxi", pricingMode: trip.pricingMode ?? "automatic",
-      offeredFare: trip.offeredFare ?? null, pickupLabel: trip.pickupLabel ?? "", destinationLabel: trip.destinationLabel ?? "",
+    batch.set(driverOfferRef, {
+      tripId, driverId: driver.id, wave, pickup: trip.pickup, destination: trip.destination,
+      serviceType: trip.serviceType, vehicleType: trip.vehicleType ?? "taxi",
+      pricingMode: trip.pricingMode ?? "automatic", offeredFare: trip.offeredFare ?? null,
+      pickupLabel: trip.pickupLabel ?? "", destinationLabel: trip.destinationLabel ?? "",
       cityId: trip.cityId, distanceKm: Math.round(driver.distanceKm * 100) / 100,
-      status: "pending", createdAt: FieldValue.serverTimestamp()
+      status: "pending", expiresAt, createdAt: FieldValue.serverTimestamp()
     });
   });
-  batch.update(db.collection("trips").doc(tripId), {
-    dispatchState: "offered",
-    dispatchWave: 1,
-    offeredDriverIds: ranked.map((d) => d.id),
-    updatedAt: FieldValue.serverTimestamp()
+  batch.update(tripRef, {
+    dispatchState: "offered", dispatchWave: wave,
+    offeredDriverIds: [...new Set([...excludedDriverIds, ...ranked.map((d) => d.id)])],
+    dispatchRadiusKm: radiusKm, updatedAt: FieldValue.serverTimestamp()
   });
   await batch.commit();
-  return { offeredDrivers: ranked.length };
+  return { offeredDrivers: ranked.length, radiusKm };
 }
 
-/** Approved drivers can switch between online and offline. */
+async function createFirstDispatchWave(tripId: string, cityId: string, pickup: Point) {
+  const result = await createDispatchWave(tripId, cityId, pickup, 1);
+  if (!result.offeredDrivers) {
+    await db.collection("trips").doc(tripId).update({
+      dispatchState: "queued", dispatchWave: 1, dispatchRadiusKm: result.radiusKm,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  }
+  return { offeredDrivers: result.offeredDrivers };
+}
+
+/** Expand dispatch from 5 km to 12 km to 25 km after each 60-second offer window. */
+export const advanceTripDispatch = onSchedule({
+  schedule: "every 1 minutes", timeZone: "Africa/Cairo", region: REGION
+}, async () => {
+  const snapshot = await db.collection("trips").where("status", "==", "searching").limit(100).get();
+  for (const tripDoc of snapshot.docs) {
+    const trip = tripDoc.data();
+    if (!["offered", "queued"].includes(trip.dispatchState)) continue;
+    if (trip.dispatchState === "offered") {
+      const offers = await tripDoc.ref.collection("offers").get();
+      const pending = offers.docs.filter((offer) => offer.data().status === "pending");
+      const hasLiveOffer = pending.some((offer) => {
+        const expiry = offer.data().expiresAt;
+        return expiry?.toMillis && expiry.toMillis() > Date.now();
+      });
+      if (hasLiveOffer) continue;
+      if (pending.length) {
+        const expiryBatch = db.batch();
+        pending.forEach((offer) => {
+          expiryBatch.update(offer.ref, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
+          expiryBatch.set(
+            db.collection("driverOffers").doc(offer.id).collection("items").doc(tripDoc.id),
+            { tripId: tripDoc.id, driverId: offer.id, status: "expired", respondedAt: FieldValue.serverTimestamp() },
+            { merge: true }
+          );
+        });
+        await expiryBatch.commit();
+      }
+    }
+    const nextWave = Number(trip.dispatchWave || 0) + 1;
+    if (nextWave > MAX_DISPATCH_WAVES) {
+      await tripDoc.ref.update({ status: "no_driver", dispatchState: "exhausted", updatedAt: FieldValue.serverTimestamp() });
+      continue;
+    }
+    const excluded = Array.isArray(trip.offeredDriverIds) ? trip.offeredDriverIds : [];
+    const result = await createDispatchWave(tripDoc.id, String(trip.cityId || ""), trip.pickup as Point, nextWave, excluded);
+    if (!result.offeredDrivers) {
+      await tripDoc.ref.update({
+        dispatchWave: nextWave,
+        dispatchState: nextWave >= MAX_DISPATCH_WAVES ? "exhausted" : "queued",
+        ...(nextWave >= MAX_DISPATCH_WAVES ? { status: "no_driver" } : {}),
+        updatedAt: FieldValue.serverTimestamp()
+      });
+    }
+  }
+});
+
 export const setDriverAvailability = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
   const availability = request.data?.availability;
@@ -222,26 +273,56 @@ export const startTrip = onCall({ region: REGION, enforceAppCheck: true }, async
  * routing integration. Never accept distance or fare from the mobile client.
  * Fare config document ID: {cityId}__{serviceType}.
  */
-export const completeTrip = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+export const completeTrip = onCall({ region: REGION, enforceAppCheck: true, secrets: [googleMapsServerKey] }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
   const tripId = String(request.data?.tripId ?? "").trim();
   if (!tripId) throw new HttpsError("invalid-argument", "رقم الرحلة غير صالح.");
   const tripRef = db.collection("trips").doc(tripId);
+  const initialSnap = await tripRef.get();
+  if (!initialSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
+  const initialTrip = initialSnap.data()!;
+  if (initialTrip.assignedDriverId !== request.auth.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
+  if (initialTrip.status !== "in_progress") throw new HttpsError("failed-precondition", "يجب بدء الرحلة أولاً.");
 
+  let mapsKey = "";
+  try { mapsKey = googleMapsServerKey.value(); } catch {
+    throw new HttpsError("failed-precondition", "يلزم إعداد مفتاح Google Routes API الآمن على الخادم قبل إنهاء الرحلة.");
+  }
+  if (!mapsKey) throw new HttpsError("failed-precondition", "مفتاح Google Routes API غير مضبوط.");
+  const routeResponse = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": mapsKey,
+      "X-Goog-FieldMask": "routes.distanceMeters"
+    },
+    body: JSON.stringify({
+      origin: { location: { latLng: { latitude: initialTrip.pickup.latitude, longitude: initialTrip.pickup.longitude } } },
+      destination: { location: { latLng: { latitude: initialTrip.destination.latitude, longitude: initialTrip.destination.longitude } } },
+      travelMode: "DRIVE",
+      languageCode: "ar-EG",
+      units: "METRIC"
+    })
+  });
+  if (!routeResponse.ok) throw new HttpsError("unavailable", "تعذر حساب مسافة الطريق من خدمة الخرائط.");
+  const routeData = await routeResponse.json() as { routes?: { distanceMeters?: number }[] };
+  const distanceMeters = routeData.routes?.[0]?.distanceMeters;
+  const km = typeof distanceMeters === "number" ? distanceMeters / 1000 : 0;
+  if (!Number.isFinite(km) || km <= 0 || km > 1000) {
+    throw new HttpsError("failed-precondition", "لم تتوفر مسافة طريق صالحة لهذه الرحلة.");
+  }
+
+  const driverOfferRef = db.collection("driverOffers").doc(request.auth.uid).collection("items").doc(tripId);
   return db.runTransaction(async (tx) => {
     const tripSnap = await tx.get(tripRef);
     if (!tripSnap.exists) throw new HttpsError("not-found", "الرحلة غير موجودة.");
     const trip = tripSnap.data()!;
     if (trip.assignedDriverId !== request.auth!.uid) throw new HttpsError("permission-denied", "هذه الرحلة ليست مسندة إليك.");
     if (trip.status !== "in_progress") throw new HttpsError("failed-precondition", "يجب بدء الرحلة أولاً.");
-    const km = trip.routeDistanceKm;
-    if (typeof km !== "number" || !Number.isFinite(km) || km <= 0 || km > 1000) {
-      throw new HttpsError("failed-precondition", "لم يتم تسجيل مسافة الطريق المعتمدة للرحلة بعد.");
-    }
 
     const fareRef = db.collection("fareConfigs").doc(`${trip.cityId}__${trip.serviceType}`);
     const driverRef = db.collection("drivers").doc(request.auth!.uid);
-    const [fareSnap, driverSnap] = await Promise.all([tx.get(fareRef), tx.get(driverRef)]);
+    const [fareSnap, driverSnap, driverOfferSnap] = await Promise.all([tx.get(fareRef), tx.get(driverRef), tx.get(driverOfferRef)]);
     if (!fareSnap.exists) throw new HttpsError("failed-precondition", "تعريفة هذه الخدمة غير مضبوطة من الإدارة.");
     if (!driverSnap.exists) throw new HttpsError("failed-precondition", "ملف السائق غير موجود.");
     const fare = fareSnap.data()!;
@@ -263,9 +344,13 @@ export const completeTrip = onCall({ region: REGION, enforceAppCheck: true }, as
       paymentMethod: "cash", paymentStatus: "pending_collection",
       updatedAt: FieldValue.serverTimestamp()
     });
+    tx.delete(db.collection("tripDriverLocations").doc(tripId));
     tx.update(driverRef, {
       availability: "online", currentTripId: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp()
+    });
+    if (driverOfferSnap.exists) tx.update(driverOfferRef, {
+      status: "completed", completedAt: FieldValue.serverTimestamp()
     });
     tx.create(db.collection("financialLedger").doc(), {
       tripId, driverId: request.auth!.uid, cityId: trip.cityId,
@@ -308,9 +393,44 @@ export const cancelTrip = onCall({ region: REGION, enforceAppCheck: true }, asyn
       status: "cancelled", cancelledBy: uid, cancelledAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp()
     });
+    tx.delete(db.collection("tripDriverLocations").doc(tripId));
     tx.create(tripRef.collection("events").doc(), {
       type: "trip_cancelled", actorId: uid, createdAt: FieldValue.serverTimestamp()
     });
     return { tripId, status: "cancelled" as const };
   });
+});
+
+
+/** Update the authenticated approved driver's live dispatch location. */
+export const updateDriverLocation = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
+  const location = request.data?.location;
+  if (!validPoint(location)) throw new HttpsError("invalid-argument", "إحداثيات الموقع غير صحيحة.");
+  const driverRef = db.collection("drivers").doc(request.auth.uid);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(driverRef);
+    if (!snap.exists) throw new HttpsError("failed-precondition", "ملف السائق غير موجود.");
+    const driver = snap.data()!;
+    if (driver.approvalStatus !== "approved") throw new HttpsError("permission-denied", "حساب السائق غير معتمد.");
+    if (!["online", "on_trip"].includes(driver.availability)) {
+      throw new HttpsError("failed-precondition", "فعّل استقبال الرحلات قبل مشاركة الموقع.");
+    }
+    const safeLocation = { latitude: location.latitude, longitude: location.longitude };
+    tx.update(driverRef, {
+      location: safeLocation,
+      locationUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp()
+    });
+    if (driver.availability === "on_trip" && typeof driver.currentTripId === "string") {
+      tx.set(db.collection("tripDriverLocations").doc(driver.currentTripId), {
+        tripId: driver.currentTripId,
+        driverId: request.auth!.uid,
+        driverName: typeof driver.name === "string" ? driver.name : (typeof driver.fullName === "string" ? driver.fullName : ""),
+        location: safeLocation,
+        updatedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+  });
+  return { updated: true };
 });

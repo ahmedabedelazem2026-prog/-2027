@@ -57,6 +57,13 @@ service cloud.firestore {
         (signedIn() && resource.data.driverId == request.auth.uid);
       allow write: if false;
     }
+    match /tripDriverLocations/{tripId} {
+      allow read: if signedIn() &&
+        get(/databases/$(database)/documents/trips/$(tripId)).data.customerId == request.auth.uid &&
+        get(/databases/$(database)/documents/trips/$(tripId)).data.assignedDriverId == resource.data.driverId &&
+        get(/databases/$(database)/documents/trips/$(tripId)).data.status in ["accepted", "in_progress"];
+      allow write: if false;
+    }
     match /{document=**} { allow read, write: if false; }
   }
 }
