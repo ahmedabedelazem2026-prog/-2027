@@ -1,7 +1,8 @@
 import { initializeApp } from "firebase-admin/app";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 
 initializeApp();
 const db = getFirestore();
@@ -9,6 +10,8 @@ const REGION = "europe-west1";
 const googleMapsServerKey = defineSecret("GOOGLE_MAPS_SERVER_API_KEY");
 const FIRST_WAVE_SIZE = 5;
 const MAX_CANDIDATES = 50;
+const MAX_DISPATCH_WAVES = 3;
+const DISPATCH_RADII_KM = [5, 12, 25];
 
 type Point = { latitude: number; longitude: number };
 const validPoint = (p: any): p is Point => p && Number.isFinite(p.latitude) &&
@@ -30,68 +33,114 @@ function distanceKm(a: Point, b: Point): number {
  * Firestore so the driver app can listen to its own offer documents.
  * A trusted scheduled worker must open later waves when no driver accepts.
  */
-async function createFirstDispatchWave(tripId: string, cityId: string, pickup: Point) {
-  const candidates = await db.collection("drivers")
-    .where("cityId", "==", cityId)
-    .where("approvalStatus", "==", "approved")
-    .where("availability", "==", "online")
-    .limit(MAX_CANDIDATES)
-    .get();
-
+async function createDispatchWave(
+  tripId: string, cityId: string, pickup: Point, wave: number, excludedDriverIds: string[] = []
+) {
+  const candidates = await db.collection("drivers").where("cityId", "==", cityId).limit(MAX_CANDIDATES).get();
+  const radiusKm = DISPATCH_RADII_KM[Math.min(wave - 1, DISPATCH_RADII_KM.length - 1)];
+  const excluded = new Set(excludedDriverIds);
   const ranked = candidates.docs
-    .map((doc) => {
-      const data = doc.data();
+    .map((driverDoc) => {
+      const data = driverDoc.data();
+      if (excluded.has(driverDoc.id) || data.approvalStatus !== "approved" || data.availability !== "online") return null;
       const location = data.location;
       if (!validPoint(location)) return null;
-      return { id: doc.id, distanceKm: distanceKm(pickup, location as Point) };
+      return { id: driverDoc.id, distanceKm: distanceKm(pickup, location as Point) };
     })
     .filter((item): item is { id: string; distanceKm: number } => item !== null)
+    .filter((item) => item.distanceKm <= radiusKm)
     .sort((a, b) => a.distanceKm - b.distanceKm)
     .slice(0, FIRST_WAVE_SIZE);
-
-  if (!ranked.length) {
-    await db.collection("trips").doc(tripId).update({
-      dispatchState: "no_eligible_drivers",
-      dispatchWave: 0,
-      updatedAt: FieldValue.serverTimestamp()
-    });
-    return { offeredDrivers: 0 };
-  }
-
-  const batch = db.batch();
-  const tripSnap = await db.collection("trips").doc(tripId).get();
+  if (!ranked.length) return { offeredDrivers: 0, radiusKm };
+  const tripRef = db.collection("trips").doc(tripId);
+  const tripSnap = await tripRef.get();
+  if (!tripSnap.exists || tripSnap.data()?.status !== "searching") return { offeredDrivers: 0, radiusKm };
   const trip = tripSnap.data()!;
+  const expiresAt = Timestamp.fromMillis(Date.now() + 60_000);
+  const batch = db.batch();
   ranked.forEach((driver, index) => {
-    const offerRef = db.collection("trips").doc(tripId).collection("offers").doc(driver.id);
+    const offerRef = tripRef.collection("offers").doc(driver.id);
     const driverOfferRef = db.collection("driverOffers").doc(driver.id).collection("items").doc(tripId);
-    batch.create(offerRef, {
-      driverId: driver.id,
-      wave: 1,
-      distanceKm: Math.round(driver.distanceKm * 100) / 100,
-      position: index + 1,
-      status: "pending",
-      createdAt: FieldValue.serverTimestamp()
+    batch.set(offerRef, {
+      driverId: driver.id, wave, distanceKm: Math.round(driver.distanceKm * 100) / 100,
+      position: index + 1, status: "pending", expiresAt, createdAt: FieldValue.serverTimestamp()
     });
-    batch.create(driverOfferRef, {
-      tripId, driverId: driver.id, wave: 1, pickup: trip.pickup,
-      destination: trip.destination, serviceType: trip.serviceType,
-      vehicleType: trip.vehicleType ?? "taxi", pricingMode: trip.pricingMode ?? "automatic",
-      offeredFare: trip.offeredFare ?? null, pickupLabel: trip.pickupLabel ?? "", destinationLabel: trip.destinationLabel ?? "",
+    batch.set(driverOfferRef, {
+      tripId, driverId: driver.id, wave, pickup: trip.pickup, destination: trip.destination,
+      serviceType: trip.serviceType, vehicleType: trip.vehicleType ?? "taxi",
+      pricingMode: trip.pricingMode ?? "automatic", offeredFare: trip.offeredFare ?? null,
+      pickupLabel: trip.pickupLabel ?? "", destinationLabel: trip.destinationLabel ?? "",
       cityId: trip.cityId, distanceKm: Math.round(driver.distanceKm * 100) / 100,
-      status: "pending", createdAt: FieldValue.serverTimestamp()
+      status: "pending", expiresAt, createdAt: FieldValue.serverTimestamp()
     });
   });
-  batch.update(db.collection("trips").doc(tripId), {
-    dispatchState: "offered",
-    dispatchWave: 1,
-    offeredDriverIds: ranked.map((d) => d.id),
-    updatedAt: FieldValue.serverTimestamp()
+  batch.update(tripRef, {
+    dispatchState: "offered", dispatchWave: wave,
+    offeredDriverIds: [...new Set([...excludedDriverIds, ...ranked.map((d) => d.id)])],
+    dispatchRadiusKm: radiusKm, updatedAt: FieldValue.serverTimestamp()
   });
   await batch.commit();
-  return { offeredDrivers: ranked.length };
+  return { offeredDrivers: ranked.length, radiusKm };
 }
 
-/** Approved drivers can switch between online and offline. */
+async function createFirstDispatchWave(tripId: string, cityId: string, pickup: Point) {
+  const result = await createDispatchWave(tripId, cityId, pickup, 1);
+  if (!result.offeredDrivers) {
+    await db.collection("trips").doc(tripId).update({
+      dispatchState: "queued", dispatchWave: 1, dispatchRadiusKm: result.radiusKm,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  }
+  return { offeredDrivers: result.offeredDrivers };
+}
+
+/** Expand dispatch from 5 km to 12 km to 25 km after each 60-second offer window. */
+export const advanceTripDispatch = onSchedule({
+  schedule: "every 1 minutes", timeZone: "Africa/Cairo", region: REGION
+}, async () => {
+  const snapshot = await db.collection("trips").where("status", "==", "searching").limit(100).get();
+  for (const tripDoc of snapshot.docs) {
+    const trip = tripDoc.data();
+    if (!["offered", "queued"].includes(trip.dispatchState)) continue;
+    if (trip.dispatchState === "offered") {
+      const offers = await tripDoc.ref.collection("offers").get();
+      const pending = offers.docs.filter((offer) => offer.data().status === "pending");
+      const hasLiveOffer = pending.some((offer) => {
+        const expiry = offer.data().expiresAt;
+        return expiry?.toMillis && expiry.toMillis() > Date.now();
+      });
+      if (hasLiveOffer) continue;
+      if (pending.length) {
+        const expiryBatch = db.batch();
+        pending.forEach((offer) => {
+          expiryBatch.update(offer.ref, { status: "expired", respondedAt: FieldValue.serverTimestamp() });
+          expiryBatch.set(
+            db.collection("driverOffers").doc(offer.id).collection("items").doc(tripDoc.id),
+            { tripId: tripDoc.id, driverId: offer.id, status: "expired", respondedAt: FieldValue.serverTimestamp() },
+            { merge: true }
+          );
+        });
+        await expiryBatch.commit();
+      }
+    }
+    const nextWave = Number(trip.dispatchWave || 0) + 1;
+    if (nextWave > MAX_DISPATCH_WAVES) {
+      await tripDoc.ref.update({ status: "no_driver", dispatchState: "exhausted", updatedAt: FieldValue.serverTimestamp() });
+      continue;
+    }
+    const excluded = Array.isArray(trip.offeredDriverIds) ? trip.offeredDriverIds : [];
+    const result = await createDispatchWave(tripDoc.id, String(trip.cityId || ""), trip.pickup as Point, nextWave, excluded);
+    if (!result.offeredDrivers) {
+      await tripDoc.ref.update({
+        dispatchWave: nextWave,
+        dispatchState: nextWave >= MAX_DISPATCH_WAVES ? "exhausted" : "queued",
+        ...(nextWave >= MAX_DISPATCH_WAVES ? { status: "no_driver" } : {}),
+        updatedAt: FieldValue.serverTimestamp()
+      });
+    }
+  }
+});
+
 export const setDriverAvailability = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "يجب تسجيل الدخول أولاً.");
   const availability = request.data?.availability;
