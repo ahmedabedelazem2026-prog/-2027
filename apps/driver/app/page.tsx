@@ -23,7 +23,7 @@ export default function Driver() {
       stopDriver?.(); stopOffers?.(); setDriver(null); setOffers([]); setUser(current);
       if (!current) return;
       stopDriver = onSnapshot(doc(client.db,"drivers",current.uid), snap => setDriver(snap.exists()?snap.data():null), () => setNotice("تعذر قراءة ملف السائق. راجع صلاحيات Firestore."));
-      stopOffers = onSnapshot(collection(client.db,"driverOffers",current.uid,"items"), snap => setOffers(snap.docs.map(d=>d.data() as DriverOffer).filter(o=>["pending","accepted"].includes(o.status))), () => setNotice("تعذر تحميل عروض الرحلات."));
+      stopOffers = onSnapshot(collection(client.db,"driverOffers",current.uid,"items"), snap => setOffers(snap.docs.map(d=>d.data() as DriverOffer).filter(o=>["pending","accepted","in_progress"].includes(o.status))), () => setNotice("تعذر تحميل عروض الرحلات."));
     });
     return () => { stopAuth(); stopDriver?.(); stopOffers?.(); };
   },[]);
