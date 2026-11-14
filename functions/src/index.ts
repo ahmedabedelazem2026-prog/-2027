@@ -414,11 +414,21 @@ export const updateDriverLocation = onCall({ region: REGION, enforceAppCheck: tr
     if (!["online", "on_trip"].includes(driver.availability)) {
       throw new HttpsError("failed-precondition", "فعّل استقبال الرحلات قبل مشاركة الموقع.");
     }
+    const safeLocation = { latitude: location.latitude, longitude: location.longitude };
     tx.update(driverRef, {
-      location: { latitude: location.latitude, longitude: location.longitude },
+      location: safeLocation,
       locationUpdatedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp()
     });
+    if (driver.availability === "on_trip" && typeof driver.currentTripId === "string") {
+      tx.set(db.collection("tripDriverLocations").doc(driver.currentTripId), {
+        tripId: driver.currentTripId,
+        driverId: request.auth!.uid,
+        driverName: typeof driver.name === "string" ? driver.name : (typeof driver.fullName === "string" ? driver.fullName : ""),
+        location: safeLocation,
+        updatedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
   });
   return { updated: true };
 });
