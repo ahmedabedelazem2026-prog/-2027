@@ -27,7 +27,25 @@ export default function Driver() {
     });
     return () => { stopAuth(); stopDriver?.(); stopOffers?.(); };
   },[]);
-  const login = async () => {
+
+  useEffect(() => {
+    if (!user || driver?.approvalStatus !== "approved" || !["online", "on_trip"].includes(driver?.availability)) return;
+    if (!navigator.geolocation) { setNotice("المتصفح لا يدعم تحديد الموقع."); return; }
+    let lastSent = 0;
+    const watchId = navigator.geolocation.watchPosition((position) => {
+      const now = Date.now();
+      if (now - lastSent < 15000) return;
+      lastSent = now;
+      const location = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+      httpsCallable(getFirebaseClient().functions, "updateDriverLocation")({ location }).catch(() => {
+        setNotice("تعذر تحديث موقعك. تأكد من اتصال الإنترنت وصلاحية الموقع.");
+      });
+    }, () => setNotice("اسمح للمتصفح بالوصول إلى الموقع أثناء استقبال الرحلات."), {
+      enableHighAccuracy: true, maximumAge: 10000, timeout: 15000
+    });
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [user, driver?.approvalStatus, driver?.availability]);
+\n  const login = async () => {
     setBusy(true); setNotice("");
     try { const {auth,googleProvider}=getFirebaseClient(); await signInWithPopup(auth,googleProvider); }
     catch { setNotice("تعذر تسجيل الدخول. تأكد من تفعيل Google وإضافة نطاق الموقع في Firebase."); }
