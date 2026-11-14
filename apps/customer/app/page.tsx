@@ -2,7 +2,7 @@
 import { useEffect,useRef,useState } from "react";
 import Script from "next/script";
 import { onAuthStateChanged,signInWithPopup,signOut,type User } from "firebase/auth";
-import { doc,onSnapshot } from "firebase/firestore";
+import { doc,getDoc,onSnapshot,serverTimestamp,setDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getFirebaseClient } from "@taxi-capital/firebase";
 declare global { interface Window { google?: any } }
@@ -10,10 +10,18 @@ type Point={latitude:number;longitude:number};
 type Place={label:string;point:Point};
 const HOME:Point={latitude:31.1321,longitude:33.8033};
 const services=[["city","🚕","داخل المدينة"],["intercity","🛣️","بين المدن"],["private","⭐","مشوار خاص"],["scheduled","🗓️","حجز مسبق"]];
+async function ensureCustomerProfile(user: User) {
+ const client=getFirebaseClient();
+ const ref=doc(client.db,"users",user.uid);
+ const profile=await getDoc(ref);
+ if(!profile.exists()) {
+  await setDoc(ref,{role:"customer",name:user.displayName||"",email:user.email||"",photoURL:user.photoURL||"",createdAt:serverTimestamp(),updatedAt:serverTimestamp()});
+ }
+}
 export default function Home(){
  const [user,setUser]=useState<User|null>(null),[pickup,setPickup]=useState<Place>({label:"موقعي الحالي - العريش",point:HOME}),[destination,setDestination]=useState<Place|null>(null),[service,setService]=useState("city"),[vehicle,setVehicle]=useState("taxi"),[pricing,setPricing]=useState("automatic"),[fare,setFare]=useState("50"),[tripId,setTripId]=useState(""),[trip,setTrip]=useState<any>(null),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false),[mapReady,setMapReady]=useState(false);
  const mapDiv=useRef<HTMLDivElement>(null),map=useRef<any>(null),fromMarker=useRef<any>(null),toMarker=useRef<any>(null),fromInput=useRef<HTMLInputElement>(null),toInput=useRef<HTMLInputElement>(null);
- useEffect(()=>{let stop:(()=>void)|undefined;try{stop=onAuthStateChanged(getFirebaseClient().auth,setUser);}catch{setNotice("إعداد Firebase غير مكتمل.");}return()=>stop?.();},[]);
+ useEffect(()=>{let stop:(()=>void)|undefined;try{stop=onAuthStateChanged(getFirebaseClient().auth,current=>{setUser(current);if(current)ensureCustomerProfile(current).catch(()=>setNotice("تعذر إنشاء ملف العميل. راجع صلاحيات users في Firestore."));});}catch{setNotice("إعداد Firebase غير مكتمل.");}return()=>stop?.();},[]);
  useEffect(()=>{if(!tripId)return;return onSnapshot(doc(getFirebaseClient().db,"trips",tripId),s=>setTrip(s.exists()?s.data():null),()=>setNotice("تعذر تحديث حالة الرحلة."));},[tripId]);
  const mapLoaded=()=>{if(!window.google||!mapDiv.current||map.current)return;const g=window.google.maps;const m=new g.Map(mapDiv.current,{center:{lat:pickup.point.latitude,lng:pickup.point.longitude},zoom:14,disableDefaultUI:true,zoomControl:true,gestureHandling:"greedy"});map.current=m;fromMarker.current=new g.Marker({map:m,position:{lat:pickup.point.latitude,lng:pickup.point.longitude},draggable:true,label:"انطلاق"});fromMarker.current.addListener("dragend",()=>{const p=fromMarker.current.getPosition();setPickup({label:"نقطة الانطلاق على الخريطة",point:{latitude:p.lat(),longitude:p.lng()}});});m.addListener("click",(e:any)=>{const p={latitude:e.latLng.lat(),longitude:e.latLng.lng()};if(!toMarker.current)toMarker.current=new g.Marker({map:m,position:e.latLng,draggable:true,label:"الوصول"});else toMarker.current.setPosition(e.latLng);setDestination({label:"الوجهة المحددة على الخريطة",point:p});});if(g.places?.Autocomplete){[[fromInput.current,"from"],[toInput.current,"to"]].forEach(([el,kind]:any)=>{if(!el)return;const ac=new g.places.Autocomplete(el,{fields:["formatted_address","geometry","name"],componentRestrictions:{country:"eg"}});ac.addListener("place_changed",()=>{const p=ac.getPlace();if(!p.geometry?.location)return;const loc=p.geometry.location,v={label:p.formatted_address||p.name||el.value,point:{latitude:loc.lat(),longitude:loc.lng()}};if(kind==="from"){setPickup(v);fromMarker.current.setPosition(loc);}else{setDestination(v);if(!toMarker.current)toMarker.current=new g.Marker({map:m,position:loc,label:"الوصول"});else toMarker.current.setPosition(loc);}m.panTo(loc);});});}setMapReady(true);};
  const locate=()=>navigator.geolocation?.getCurrentPosition(pos=>{const p={latitude:pos.coords.latitude,longitude:pos.coords.longitude};setPickup({label:"موقعي الحالي",point:p});const ll={lat:p.latitude,lng:p.longitude};map.current?.panTo(ll);fromMarker.current?.setPosition(ll);},()=>setNotice("اسمح للموقع بالوصول إلى GPS."),{enableHighAccuracy:true,timeout:12000});
