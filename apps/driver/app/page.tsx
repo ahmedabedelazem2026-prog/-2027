@@ -64,6 +64,12 @@ export default function Driver() {
     catch (e) { setNotice(e instanceof Error?e.message:"تعذر بدء الرحلة."); }
     finally { setBusy(false); }
   };
+  const complete = async (tripId:string) => {
+    setBusy(true); setNotice("");
+    try { const {functions}=getFirebaseClient(); const result:any=await httpsCallable(functions,"completeTrip")({tripId}); setNotice(`اكتملت الرحلة. الإجمالي: ${result.data.totalFare} جنيه.`); }
+    catch (e) { setNotice(e instanceof Error?e.message:"تعذر إنهاء الرحلة."); }
+    finally { setBusy(false); }
+  };
   const accept = async (tripId:string) => {
     setBusy(true); setNotice("");
     try { const {functions}=getFirebaseClient(); await httpsCallable(functions,"acceptTrip")({tripId}); setNotice("تم قبول الرحلة."); }
@@ -83,7 +89,7 @@ export default function Driver() {
         </>}
       </>}
     </section>
-    <section style={{marginTop:22}}><h2>عروض الرحلات</h2>{offers.length===0?<p>لا توجد عروض حالياً.</p>:offers.map(o=><article key={o.tripId} style={{background:"white",padding:18,borderRadius:14,marginBottom:12}}><b>{serviceNames[o.serviceType||""]||"طلب رحلة"}</b><p>السيارة: {o.vehicleType==="private"?"خاصة":"أجرة"} · التسعير: {o.pricingMode==="offer"?"عرض العميل":"سعر المنصة"} {o.offeredFare? "· "+o.offeredFare+" جنيه":""}</p><p>من: {o.pickupLabel||"الموقع على الخريطة"}</p><p>إلى: {o.destinationLabel||"الموقع على الخريطة"}</p><p>المدينة: {o.cityId||"—"} · المسافة التقريبية: {typeof o.distanceKm==="number"?o.distanceKm+" كم":"—"}</p><p>نقطة الانطلاق: {o.pickup?o.pickup.latitude.toFixed(4)+", "+o.pickup.longitude.toFixed(4):"—"}</p><p>الوجهة: {o.destination?o.destination.latitude.toFixed(4)+", "+o.destination.longitude.toFixed(4):"—"}</p><p>الحالة: {o.status==="accepted"?"مقبولة":o.status==="in_progress"?"قيد التنفيذ": "بانتظار الرد"}</p>{o.status==="pending"&&<button disabled={busy||driver?.approvalStatus!=="approved"||driver?.availability!=="online"} onClick={()=>accept(o.tripId)}>قبول الرحلة</button>}{o.status==="accepted"&&<button disabled={busy} onClick={()=>start(o.tripId)}>بدء الرحلة</button>}</article>)}</section>
+    <section style={{marginTop:22}}><h2>عروض الرحلات</h2>{offers.length===0?<p>لا توجد عروض حالياً.</p>:offers.map(o=><article key={o.tripId} style={{background:"white",padding:18,borderRadius:14,marginBottom:12}}><b>{serviceNames[o.serviceType||""]||"طلب رحلة"}</b><p>السيارة: {o.vehicleType==="private"?"خاصة":"أجرة"} · التسعير: {o.pricingMode==="offer"?"عرض العميل":"سعر المنصة"} {o.offeredFare? "· "+o.offeredFare+" جنيه":""}</p><p>من: {o.pickupLabel||"الموقع على الخريطة"}</p><p>إلى: {o.destinationLabel||"الموقع على الخريطة"}</p><p>المدينة: {o.cityId||"—"} · المسافة التقريبية: {typeof o.distanceKm==="number"?o.distanceKm+" كم":"—"}</p><p>نقطة الانطلاق: {o.pickup?o.pickup.latitude.toFixed(4)+", "+o.pickup.longitude.toFixed(4):"—"}</p><p>الوجهة: {o.destination?o.destination.latitude.toFixed(4)+", "+o.destination.longitude.toFixed(4):"—"}</p><p>الحالة: {o.status==="accepted"?"مقبولة":o.status==="in_progress"?"قيد التنفيذ": "بانتظار الرد"}</p>{o.status==="pending"&&<button disabled={busy||driver?.approvalStatus!=="approved"||driver?.availability!=="online"} onClick={()=>accept(o.tripId)}>قبول الرحلة</button>}{o.status==="accepted"&&<button disabled={busy} onClick={()=>start(o.tripId)}>بدء الرحلة</button>}{o.status==="in_progress"&&<button disabled={busy} onClick={()=>complete(o.tripId)}>إنهاء الرحلة وتسجيل الحساب</button>}</article>)}</section>
     {notice&&<p role="status" style={{background:"#fff8e9",padding:12,borderRadius:10}}>{notice}</p>}
     <p style={{color:"#718096",fontSize:12,marginTop:24}}>تتطلب الوظائف المنشورة تفعيل Firebase App Check قبل التشغيل.</p>
   </main>;
